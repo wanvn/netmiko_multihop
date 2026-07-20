@@ -44,6 +44,70 @@ platforms = {
         "optional_parameters": "",
         "vrf_str": "",
     },
+    "cisco_ios_telnet": {
+        "ssh_base_cmd": "ssh",
+        "telnet_base_cmd": "telnet",
+        "ssh_cmd_str": "{ssh_base_cmd} -l {username} -p {target_port} {vrf_str} {ip} {optional_parameters}",
+        "telnet_cmd_str": "{telnet_base_cmd} {ip} {target_port}",
+        "ssh_password_pattern": "[pP]assword:",
+        "telnet_password_pattern": "[pP]assword:",
+        "telnet_username_pattern": "[uU]sername:",
+        "ssh_accept_host_pattern": "yes/no",
+        "ssh_accept_host_command": "yes",
+        "ssh_verbose_option": None,
+        "ssh_disconnect_sequence": "\n~.\n",
+        "telnet_disconnect_sequence": "\x1b\rquit\r\n",
+        "vrf_prefix": "-vrf ",
+        "optional_parameters": "",
+        "vrf_str": "",
+    },
+    "cisco_xr_telnet": {
+        "ssh_base_cmd": "ssh",
+        "telnet_base_cmd": "telnet",
+        "ssh_cmd_str": "{ssh_base_cmd} {vrf_str} {ip} {port_str} username {username}",
+        "telnet_cmd_str": "{telnet_base_cmd} {vrf_str} {ip} {target_port}",
+        "ssh_password_pattern": "[pP]assword:",
+        "telnet_password_pattern": "[pP]assword:",
+        "telnet_username_pattern": "[uU]sername:",
+        "ssh_accept_host_pattern": "yes/no",
+        "ssh_accept_host_command": "yes",
+        "ssh_verbose_option": None,
+        "ssh_disconnect_sequence": "\n~.\n",
+        "telnet_disconnect_sequence": "\x1b\rquit\r\n",
+        "vrf_prefix": "vrf ",
+        "port_prefix": "port ",
+        "optional_parameters": "",
+        "vrf_str": "",
+        "port_str": "",
+    },
+    "huawei_telnet": {
+        "ssh_base_cmd": "ssh",
+        "telnet_base_cmd": "telnet",
+        "ssh_cmd_str": "{ssh_base_cmd} -l {username} -p {target_port} {vrf_str} {ip} {optional_parameters}",
+        "telnet_cmd_str": "{telnet_base_cmd} {ip} {target_port}",
+        "ssh_password_pattern": "[pP]assword:",
+        "telnet_password_pattern": "[pP]assword:",
+        "telnet_username_pattern": "[uU]ser[nN]ame:",
+        "ssh_accept_host_pattern": "yes/no",
+        "ssh_accept_host_command": "yes",
+        "ssh_verbose_option": None,
+        "ssh_disconnect_sequence": "\n~.\n",
+        "telnet_disconnect_sequence": "\x1b\rquit\r\n",
+        "optional_parameters": "",
+        "vrf_str": "",
+    },
+    "fortinet": {
+        "ssh_base_cmd": "ssh",
+        "ssh_cmd_str": "{ssh_base_cmd} -l {username} -p {target_port} {vrf_str} {ip} {optional_parameters}",
+        "ssh_password_pattern": "[pP]assword:",
+        "ssh_accept_host_pattern": "yes/no",
+        "ssh_accept_host_command": "yes",
+        "ssh_verbose_option": None,
+        "ssh_disconnect_sequence": "\n~.\n",
+        "vrf_prefix": "",
+        "optional_parameters": "",
+        "vrf_str": "",
+    },
 }
 
 
@@ -94,17 +158,13 @@ def jump_telnet(**kwargs):
         )
     except Exception:
         raise netmiko.ConfigInvalidException(f"Cannot jump to {kwargs.get('target_ip')}. Username pattern not found.")
-    finally:
-        self.cleanup()
-
+    
     try:
         result = _self.send_command(
             kwargs["target_username"] + "\r", f"({telnet_password_pattern})" , normalize=False
         )
     except Exception:
         raise netmiko.ConfigInvalidException(f"Cannot jump to {kwargs.get('target_ip')}. Password pattern not found.")
-    finally:
-        self.cleanup()
 
     _self.write_channel(kwargs["target_password"] + "\n")
 
@@ -115,6 +175,7 @@ def jump_ssh(**kwargs):
     _cfg=kwargs.get("_cfg")
     _self=kwargs.get("self")
     #process ssh nexhop
+    # print(f"[DEBUG] Current device_type: {_self.device_type}")
     ssh_accept_host_pattern = platforms[_self.device_type]["ssh_accept_host_pattern"]
     ssh_password_pattern = platforms[_self.device_type]["ssh_password_pattern"]
     ssh_accept_host_command = platforms[_self.device_type]["ssh_accept_host_command"]
@@ -127,18 +188,39 @@ def jump_ssh(**kwargs):
             "vrf_str"
         ] = f"{platforms[_self.device_type].get('vrf_prefix', '')}{kwargs['vrf']}"
 
+    # For platforms like IOS-XR where default port 22 should be omitted
+    if "port_prefix" in platforms[_self.device_type]:
+        target_port = kwargs.get("target_port", kwargs.get("port", 22))
+        if target_port and target_port != 22:
+            cfg["port_str"] = f"{platforms[_self.device_type].get('port_prefix', '')}{target_port}"
+        else:
+            cfg["port_str"] = ""
+
     ssh_cmd_str = platforms[_self.device_type]["ssh_cmd_str"].format(**cfg)
     log.debug(ssh_cmd_str)
+    # print(f"[DEBUG] Executing SSH command: {ssh_cmd_str}")
+    # print(f"[DEBUG] Waiting for pattern: ({ssh_password_pattern})|({ssh_accept_host_pattern})")
 
+    read_timeout = kwargs.get("read_timeout", 60)
     try:
         result = _self.send_command(
             ssh_cmd_str, f"({ssh_password_pattern})|({ssh_accept_host_pattern})",
+            read_timeout=read_timeout,
         )
-    except Exception:
-        raise netmiko.ConfigInvalidException(f"Cannot jump to {kwargs.get('target_ip')}.")
-    finally:
-        self.cleanup()
+    except Exception as e:
+        # Try to read whatever the device output so far
+        try:
+            partial_output = _self.read_channel()
+        except Exception:
+            partial_output = ""
+        # print(f"[DEBUG] SSH command failed. Error: {e}")
+        # print(f"[DEBUG] Device output so far:\n---\n{partial_output}\n---")
+        raise netmiko.ConfigInvalidException(
+            f"Cannot jump to {kwargs.get('target_ip')}. "
+            f"Pattern not detected. Device output:\n{partial_output}"
+        )
 
+    # print(f"[DEBUG] SSH jump successful. Matched output: {result[:200]}")
     if ssh_accept_host_pattern in result:
         _self.send_command(ssh_accept_host_command, ssh_password_pattern)
     
@@ -154,21 +236,14 @@ def jump_to(self, **kwargs):
         target_ip = kwargs["ip"]
     except KeyError:
         raise netmiko.ConfigInvalidException("Jump target IP must be set")
-    finally:
-        self.cleanup()
-
     try:
         target_username = kwargs["username"]
     except KeyError:
         raise netmiko.ConfigInvalidException("Jump target username must be set")
-    finally:
-        self.cleanup()
     try:
         target_password  = kwargs["password"]
     except KeyError:
         raise netmiko.ConfigInvalidException("Jump target password must be set")
-    finally:
-        self.cleanup()    
     try:
         if "telnet" in kwargs["device_type"]:
             target_port  = 23
@@ -190,16 +265,12 @@ def jump_to(self, **kwargs):
     no_log = {"password": target_password}
     log.addFilter(netmiko.base_connection.SecretsFilter(no_log=no_log))
 
-    try:
-        if "telnet" in kwargs["device_type"]:
-            jump_telnet(**{**locals(),**kwargs})
-        else:
-            jump_ssh(**{**locals(),**kwargs})
-    except Exception as e:
-        log.error(e)
-    finally:
-        self.cleanup()
-        return self
+    if "telnet" in kwargs["device_type"]:
+        # print(f"[DEBUG] Jumping via telnet from {self.device_type} to {target_device_type} ({target_ip})")
+        jump_telnet(**{**locals(),**kwargs})
+    else:
+        # print(f"[DEBUG] Jumping via ssh from {self.device_type} to {target_device_type} ({target_ip})")
+        jump_ssh(**{**locals(),**kwargs})
 
     self.__jump_device_list.append(
         {"ip": self.host, "device_type": self.device_type, "username": self.username}
